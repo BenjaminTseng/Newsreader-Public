@@ -1,0 +1,1 @@
+[{"site": "Google Blog", "nickname": "googleblog", "type": "google_news", "url": "https://blog.google/news-sitemap.xml/"}, {"site": "Huggingface Blog", "nickname": "huggingface", "type": "huggingface_rss", "url": "https://huggingface.co/blog/feed.xml"}]

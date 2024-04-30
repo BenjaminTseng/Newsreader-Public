@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Feed View</title>
+  <style>
+    /* CSS styles */
+    .feed-container {
+      max-width: 800px; /* Set maximum width */
+      margin: 0 auto; /* Center the feed items */
+    }
+  
+    .feed-item {
+      font-family: Arial, sans-serif;
+      margin-bottom: 20px;
+      padding: 10px;
+      border: 1px solid #ccc; /* Add border around feed items */
+      border-radius: 5px; /* Add border radius */
+      transition: opacity 0.3s ease; /* Add opacity transition */
+    }
+  
+    .feed-item.read {
+      opacity: 0.5; /* Reduce opacity for read items */
+    }
+  
+    .feed-item.read .summary {
+      display: none;
+    }
+
+    .feed-item h2 {
+      margin-bottom: 5px;
+    }
+  
+    .feed-item p {
+      margin: 5px 0;
+    }
+
+    .feed-item img {
+      max-width: 100%;
+    }
+
+    .feed-item a {
+      color: #1a4d80; /* Darker blue */
+      text-decoration: none;
+    }
+  
+    .feed-item a:hover {
+      text-decoration: underline;
+    }
+  
+    .feed-item .buttons {
+      display: flex;
+    }
+
+    .feed-item .buttons > * {
+      margin-right: 5px;
+    }
+
+    .feed-item .info {
+      display: flex;
+      flex-direction: column;
+    }
+  
+    .feed-item .info > div {
+      margin-top: 5px;
+    }
+  
+    .feed-item .info > div p {
+      margin: 0;
+    }
+  
+    .feed-item .info .author-source {
+      display: flex;
+      flex-direction: column;
+    }
+  
+    .rating-button {
+      cursor: pointer;
+      padding: 5px 10px;
+      border: 1px solid #ccc; /* Add border */
+      border-radius: 5px;
+      background-color: white; /* White background */
+      margin-right: 5px; /* Add margin between buttons */
+    }
+  
+    .rating-button:hover {
+      background-color: #f0f0f0; /* Light gray background on hover */
+    }
+
+    .rating-button.selected {
+      background-color: #666;
+    }
+  
+    .mark-read-button, .dismiss-button {
+      cursor: pointer;
+      padding: 5px 10px;
+      border: 1px solid #ccc; /* Add border */
+      border-radius: 5px;
+      background-color: white; /* White background */
+      max-width: fit-content;
+    }
+
+    .mark-read-button:hover, .dismiss-button:hover {
+      background-color: #f0f0f0; /* Light gray background on hover */
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module">
+    const initialFeedData = [
+      {% for item in fetchItems %}
+      {
+        articleId: {{ item.articleId }},
+        title: "{{ item.title|safe}}",
+        articleUrl: "{{ item.articleUrl }}",
+        source: "{{ item.source }}",
+        author_href: "{{ item.author_href }}",
+        author_name: "{{ item.author_name|safe}}",
+        date: "{{ item.date }}",
+        score: {{ item.score }},
+        summary: "{{ item.summary|safe }}",
+        rating: null,
+        read: false
+      }{{ "," if not loop.last }}
+      {% endfor %}
+    ];
+    import { html, render, Component } from 'https://unpkg.com/htm/preact/standalone.module.js';
+  
+    // Define FeedItem component
+    const FeedItem = ({ item, onRate, onMarkAsRead, onDismiss }) => {
+      const handleRate = (rating) => {
+        onRate(rating);
+      };
+
+      const handleMarkAsRead = (fromLink) => () => {
+        // If the event is from a link and the item is already read, do nothing
+        if (fromLink && item.read) {
+          return;
+        }
+        // Otherwise, toggle the read status
+        const newStatus = !item.read;
+        onMarkAsRead(newStatus);
+      };
+
+      const handleDismiss = () => {
+        onDismiss();
+      };
+
+      return html`
+        <div class="feed-item ${item.read ? 'read' : ''}">
+          <div class="info">
+            <a href="${item.articleUrl}" onclick=${handleMarkAsRead(true)} target="_blank">
+              <h2>${item.title}</h2>
+            </a>
+            <div class="buttons">
+              <button class="mark-read-button" onclick=${handleMarkAsRead(false)}>${item.read ? 'Mark as Unread' : 'Mark as Read'}</button>
+              <button class="dismiss-button" onclick=${handleDismiss}>Dismiss for Now</button>
+            </div>
+            <div>
+              <p><em>${item.source}</em></p>
+              <p><a href="${item.author_href}" target="_blank">${item.author_name}</a></p>
+              <p><strong>Published:</strong> ${new Date(item.date).toLocaleDateString()}</p>
+              <p><strong>Score:</strong> ${item.score.toFixed(3)}</p>
+            </div>
+            <div class="summary">
+              ${item.summary ? html`<div dangerouslySetInnerHTML=${{'{{'}} __html: item.summary {{'}}'}}></div>` : html`<p>No summary provided</p>`}
+            </div>
+          </div>
+          <div>
+            <button title="Score: 1.0" onclick=${() => handleRate(1.0)} class="rating-button ${item.rating === 1.0 ? 'selected' : ''}">👍🏻</button>
+            <button title="Score: 0.5" onclick=${() => handleRate(0.5)} class="rating-button ${item.rating === 0.5 ? 'selected' : ''}">🤷🏻‍♂️</button>
+            <button title="Score: 0.0" onclick=${() => handleRate(0.0)} class="rating-button ${item.rating === 0.0 ? 'selected' : ''}">👎🏻</button>
+          </div>
+        </div>
+      `;
+    };
+  
+    // Define App component
+    class App extends Component {
+      constructor() {
+        super();
+        this.state = {
+          items: initialFeedData,
+          loading: false
+        };
+
+        this.offset = {{ n }};
+        this.bad = {{ bad }};
+        this.random = {{ random }};
+      }
+  
+      componentDidMount() {
+        console.log('Iggregate start!')
+      }
+  
+      fetchFeedItems = async (n, offset, bad, random) => {
+        try {
+            // Show loading state 
+            this.setState({ loading: true });
+
+            // Fetch feed items
+            const response = await fetch(`/articles?n=${n}&offset=${offset}&bad=${bad}&random=${random}`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${this.getAccessToken()}`
+                }
+            });
+
+            if (!response.ok) {
+                if (response.status === 401) {
+                    window.location.href = '/login?message=Login+expired';
+                }
+                throw new Error('Failed to fetch feed items');
+            }
+
+            const data = await response.json();
+
+            this.setState(prevState => ({
+                items: [...prevState.items, ...(data.items || [])], // Append new items to existing items
+                loading: false // Update loading state
+            }));
+
+            // Store the offset for subsequent calls
+            this.offset = data.offset;
+        } catch (error) {
+            console.error('Error fetching feed items:', error);
+        }
+      };
+
+      getAccessToken() {
+        const cookies = document.cookie.split('; ');
+        const tokenCookie = cookies.find(cookie => cookie.startsWith('access_token='));
+        if (tokenCookie) {
+          return tokenCookie.split('=')[1];
+        }
+        return null;
+      }
+
+      onRate = async (articleId, rating) => {
+        try {
+            // Find the item being rated
+            const itemToRate = this.state.items.find(item => item.articleId === articleId);
+
+            // Store the previous rating
+            const previousRating = itemToRate.rating;
+
+            // Optimistically update the item's rating
+            this.setState(prevState => ({
+                items: prevState.items.map(item => {
+                    if (item.articleId === articleId) {
+                        return { ...item, rating: rating };
+                    }
+                    return item;
+                })
+            }));
+
+            // Perform the API call
+            const response = await fetch('/rate', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${this.getAccessToken()}`
+                },
+                body: JSON.stringify({ articleId, rating })
+            });
+
+            if (!response.ok) {
+                if (response.status === 401) {
+                    window.location.href = '/login?message=Login+expired';
+                }
+                throw new Error('Failed to rate article');
+            }
+        } catch (error) {
+            console.error('Error rating article:', error);
+            // Revert the item's rating to the previous value
+            this.setState(prevState => ({
+                items: prevState.items.map(item => {
+                    if (item.articleId === articleId) {
+                        return { ...item, rating: previousRating };
+                    }
+                    return item;
+                })
+            }));
+            throw error; // Rethrow the error for further handling
+        }
+      };
+
+      onMarkAsRead = async (articleId, status) => {
+        try {
+            // Optimistically update the item's read state
+            this.setState(prevState => ({
+                items: prevState.items.map(item => {
+                    if (item.articleId === articleId) {
+                        return { ...item, read: status };
+                    }
+                    return item;
+                })
+            }));
+            const response = await fetch('/read', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${this.getAccessToken()}`
+                },
+                body: JSON.stringify({ articleId, status })
+            });
+
+            if (!response.ok) {
+                if (response.status === 401) {
+                    window.location.href = '/login?message=Login+expired';
+                }
+                throw new Error('Failed to mark article as read/unread');
+            }
+        } catch (error) {
+            console.error('Error marking article as read/unread:', error);
+            // Revert the item's read state if the backend request fails
+            this.setState(prevState => ({
+                items: prevState.items.map(item => {
+                    if (item.articleId === articleId) {
+                        return { ...item, read: !status };
+                    }
+                    return item;
+                })
+            }));
+            throw error;
+        }
+      };
+
+      onDismiss = (articleId) => {
+        // Filter out the dismissed item
+        this.setState(prevState => ({
+          items: prevState.items.filter(item => item.articleId !== articleId)
+        }));
+      };
+
+      render() {
+        const { items, loading } = this.state;
+
+        return html`
+          <div class="feed-container">
+            ${items.map(item => html`
+              <${FeedItem}
+                item=${item}
+                onRate=${(rating) => this.onRate(item.articleId, rating)}
+                onMarkAsRead=${(status) => this.onMarkAsRead(item.articleId, status)}
+                onDismiss=${() => this.onDismiss(item.articleId)}
+              />
+            `)}
+            ${loading ? html`<p>Loading...</p>` : ''}
+            <div class="load-more">
+              <button onclick=${() => this.fetchFeedItems(5, this.offset, this.bad, this.random)}>Load More</button>
+            </div>
+          </div>
+        `;
+      };
+    };
+  
+    // Render the App component
+    render(html`<${App} />`, document.getElementById('app'));
+  </script>
+  
+</body>
+</html>

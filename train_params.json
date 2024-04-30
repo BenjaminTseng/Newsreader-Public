@@ -1,0 +1,1 @@
+{"num_articles_posttrain": 1000, "num_articles_embedding_avg_posttrain": 10, "model_id": "roberta_base_en", "max_user_ratings": 5000, "type_all_epochs": 5, "recommend_mse_patience": 6, "batch_size": 10, "train_val_split": 0.1}

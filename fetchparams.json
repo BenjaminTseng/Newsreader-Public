@@ -1,0 +1,1 @@
+{"recency_factor": 0.25, "day_decay_threshold": -60, "day_decay_scale": 30.0, "rating_factor": 0.5, "similarity_factor": 0.25, "article_history_inertia": 0.85}
