@@ -4,7 +4,6 @@ from fastapi import FastAPI, Depends, HTTPException, Form, Request, Cookie, Head
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.security import OAuth2PasswordBearer
 import fastapi
 import datetime
 import os
@@ -12,8 +11,7 @@ from typing import List
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 
-# trick to make local development work
-root_path = '' if modal.is_local() else '/data/api/'
+root_path = '/data/api/'
 
 # Modal image initialization
 image = (
@@ -122,7 +120,7 @@ def get_current_user_bearer(authorization: str | None = Header(None)):
         return user
 
 # for use with fetch articles endpoints
-def fetchCall(user_id: int, n: int, offset: int=0, unread: bool=True, bad: bool=False, random: bool=False):
+def fetchCall(user_id: int, n: int, offset: int=0, unread: bool=True, bad: bool=False, random: bool=False, source: List[int] = Query(None)):
     import json 
     import psycopg2
     import psycopg2.extras
@@ -135,33 +133,28 @@ def fetchCall(user_id: int, n: int, offset: int=0, unread: bool=True, bad: bool=
         s = s.replace("""<!DOCTYPE html PUBLIC '-//W3C//DTD HTML 4.0 Transitional//EN' 'http://www.w3.org/TR/REC-html40/loose.dtd'>""","")
         s = s.replace("\n", " ")
         return s
-
-    # pull fetch configuration from JSON file which dictates weights / parameters for
-    # recency_factor: (0.25) how much recency matters (should sum with rating_factor and similarity_factor to 1.0)
-    # day_decay_threshold: (-60) at what point does article age no longer decay (can be anything from -1 to -inf)
-    # day_decay_scale: (30.0) how exponential decay scales (higher number = slower, lower number = faster)
-    # rating_factor: (0.5) how much AI rating matters (should sum with recency_factor and similarity_factor to 1.0)
-    # similarity_factor: (0.25) how much similarity to user history matters (should sum with recency_factor and rating_factor to 1.0)
-    # article_history_inertia: (0.85) inertia factor on recently read history (should be 0.0-1.0)
-    with open(root_path + 'fetchparams.json', 'r') as f:
-        fetchparams = json.load(f)
     
     # construct fetch query
     base_query = "SELECT\n"
-    base_query += "    a.id, a.url, a.title, a.date, a.author_name, a.author_href, a.source, a.summary, au.ai_rating\n"
-    base_query += "FROM articles a\nJOIN articleuser au ON a.id = au.article_id\nJOIN users u ON u.id = au.user_id\n"
-    base_query += "WHERE\n    au.user_id = %s"
+    base_query += "    a.id, a.url, a.title, a.date, a.author_name, a.author_href, s.name AS source, s.id AS source_id, a.summary, au.ai_rating, au.user_rating, au.user_read\n"
+    base_query += "FROM articles a\nJOIN articleuser au ON a.id = au.article_id\nJOIN users u ON u.id = au.user_id\nJOIN sources s ON a.source = s.id\n"
+    base_query += "WHERE\n    au.user_id = %s\n    AND au.ai_rating IS NOT NULL "
 
     if unread:
         base_query += " AND au.user_read = FALSE"
+    
+    if source:
+        source_tuple = str(tuple(source)+(-1,)) if len(source) == 1 else str(tuple(source))
+        base_query += " AND a.source IN " + source_tuple
+        source_name_query = "SELECT name FROM sources WHERE id IN " + source_tuple
+
     if random:
         base_query += "\nORDER BY RANDOM()\n"
     else:
         if bad:
-            base_query += "\nORDER BY (%s * au.ai_rating + %s * (1-(a.embedding <=> u.recent_articles_read))) ASC\n"
+            base_query += "\nORDER BY au.fetch_rating ASC, a.id DESC\n"
         else:
-            base_query += "\nORDER BY (%s * EXP(LEAST((a.date - CURRENT_DATE)::INT, %s) / %s) +  %s * au.ai_rating + %s * (1-(a.embedding <=> u.recent_articles_read)))"
-            base_query += " DESC\n"
+            base_query += "\nORDER BY au.fetch_rating DESC, a.id DESC\n"
         
         base_query += "OFFSET %s\n"
     
@@ -174,21 +167,9 @@ def fetchCall(user_id: int, n: int, offset: int=0, unread: bool=True, bad: bool=
             if random:
                 cur.execute(base_query, (user_id, 
                                         n))
-            elif bad:
-                cur.execute(base_query, (user_id, 
-                                        fetchparams['rating_factor'],
-                                        fetchparams['similarity_factor'],
-                                        offset,
-                                        n))
             else:
-                cur.execute(base_query, (user_id, 
-                                        fetchparams['recency_factor'], 
-                                        fetchparams['day_decay_threshold'],
-                                        fetchparams['day_decay_scale'],
-                                        fetchparams['rating_factor'],
-                                        fetchparams['similarity_factor'],
-                                        offset,
-                                        n))
+                cur.execute(base_query, (user_id, offset, n))
+        
         except Exception as e:
             print('Could not run fetch articles query, error:', e)
             return []
@@ -202,11 +183,25 @@ def fetchCall(user_id: int, n: int, offset: int=0, unread: bool=True, bad: bool=
                 "author_name": row["author_name"], 
                 "author_href": row["author_href"],
                 "source": row["source"],
+                "source_id": row["source_id"],
                 "summary": remove_quotes(row["summary"]) if row["summary"] else "",
-                "score": row["ai_rating"]
+                "score": row["ai_rating"],
+                "user_rating": "false" if row["user_rating"] == None else row["user_rating"],
+                "user_read": "true" if row["user_read"] else "false",
             } for row in cur]
     
-    return fetchItems
+        if source:
+            try:
+                cur.execute(source_name_query)
+            except Exception as e:
+                print('Couldn\'t run source name query, error:', e)
+            else:
+                source_names = [remove_quotes(row['name']) for row in cur]
+
+    if source:
+        return fetchItems, source_names
+    else:
+        return fetchItems, []
 
 # web URL for login
 # message: (optional) message to be passed to login page as to context for why 
@@ -250,20 +245,22 @@ def authPage(email: str = Form(), password: str = Form()):
 # bad: (default = False) whether or not to return feed in reverse order
 # random: (default = False) whether or not to return random feed items in random order
 @web_app.get("/")
-def mainPage(request: Request, user: User | None = Depends(get_current_user_cookie), n: int=Query(10, le=50), unread: bool=True, bad: bool=False, random: bool=False):
+def mainPage(request: Request, user: User | None = Depends(get_current_user_cookie), n: int=Query(10, le=50), unread: bool=True, bad: bool=False, random: bool=False, source: List[int] = Query(None)):
     if not user:
         return RedirectResponse("/login?message=Please+login")
 
-    fetchItems = fetchCall(user_id=user.id, n=n, unread=unread, bad=bad, random=random)
+    fetchItems, source_names = fetchCall(user_id=user.id, n=n, unread=unread, bad=bad, random=random, source=source)
     
     # return template
     templates = Jinja2Templates(directory=root_path)
     return templates.TemplateResponse(
-        name="feedview.html", 
+        name="feedview.html.j2", 
         context={
             "userId": user.id, 
             "fetchItems": fetchItems, 
             "n": n, 
+            "source": source if source else [],
+            "source_names": source_names,
             "bad": "true" if bad else "false", # javascript bools are lowercase
             "random": "true" if random else "false", # javascript bools are lowercase
             "request": request
@@ -279,7 +276,7 @@ def mainPage(request: Request, user: User | None = Depends(get_current_user_cook
 # bad: (default = False) whether or not to return feed in reverse order
 # random: (default = False) whether or not to return random feed items in random order
 @web_app.get("/articles", status_code=fastapi.status.HTTP_202_ACCEPTED)
-def fetchArticles(n: int = Query(5, le=50), offset: int = 0, unread: bool = True, bad: bool = False, random: bool=False, current_user: User | None = Depends(get_current_user_bearer)) -> FeedItemListResponse:
+def fetchArticles(n: int = Query(5, le=50), offset: int = 0, unread: bool = True, bad: bool = False, random: bool=False, source: List[int] = Query(None), current_user: User | None = Depends(get_current_user_bearer)) -> FeedItemListResponse:
     if not current_user:
         raise HTTPException(
             status_code=fastapi.status.HTTP_401_UNAUTHORIZED,
@@ -287,7 +284,7 @@ def fetchArticles(n: int = Query(5, le=50), offset: int = 0, unread: bool = True
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    fetchItems = fetchCall(user_id=current_user.id, n=n, offset=offset, unread=unread, bad=bad, random=random)
+    fetchItems, source_names = fetchCall(user_id=current_user.id, n=n, offset=offset, unread=unread, bad=bad, random=random, source=source)
     return {'items': fetchItems, 'offset': offset + n}
 
 # POST endpoint to mark an item as read and updates the user's read history
@@ -306,6 +303,7 @@ def markItemRead(payload: MarkItemReadPayload, current_user: User | None = Depen
     # rating_factor: (0.5) how much AI rating matters (should sum with recency_factor and similarity_factor to 1.0)
     # similarity_factor: (0.25) how much similarity to user history matters (should sum with recency_factor and rating_factor to 1.0)
     # article_history_inertia: (0.85) inertia factor on recently read history (should be 0.0-1.0)
+    # read_articles_to_refresh: (10) how often to refresh cached similarity scores
     with open(root_path + 'fetchparams.json', 'r') as f:
         fetchparams = json.load(f)
 
@@ -328,20 +326,55 @@ def markItemRead(payload: MarkItemReadPayload, current_user: User | None = Depen
             cur.execute("ROLLBACK")
             raise HTTPException(status_code=424, detail="Could not update read status on article " + str(payload.articleId) + " for user " + str(current_user.id) + " to " + str(payload.status))
         
-        # update user history embedding 
+        # update user history embedding and check refresh
+        read_articles_to_refresh = fetchparams["read_articles_to_refresh"]
         old_weight = fetchparams['article_history_inertia']
         new_weight = 1 - old_weight
         try:            
-            cur.execute("SELECT a.embedding AS article_embedding, u.recent_articles_read AS user_embedding FROM articleuser au JOIN articles a ON au.article_id = a.id JOIN users u ON au.user_id = u.id WHERE au.article_id = %s AND au.user_id = %s",
+            cur.execute("SELECT a.embedding AS article_embedding, u.recent_articles_read AS user_embedding, u.articles_since_lastrefresh FROM articleuser au JOIN articles a ON au.article_id = a.id JOIN users u ON au.user_id = u.id WHERE au.article_id = %s AND au.user_id = %s",
                 (payload.articleId, current_user.id)
             )
-            article_embedding, user_read_embedding = cur.fetchone()
+            article_embedding, user_read_embedding, user_articles_since_lastrefresh = cur.fetchone()
             if payload.status:
                 new_user_read_embedding = user_read_embedding * old_weight + article_embedding * new_weight
             else:
                 new_user_read_embedding = (user_read_embedding - article_embedding * new_weight)*(new_weight+old_weight)/old_weight
             
-            cur.execute("UPDATE users SET recent_articles_read = %s, updated_at = NOW() WHERE id = %s", (new_user_read_embedding, current_user.id))
+            cur.execute("UPDATE users SET recent_articles_read = %s, updated_at = NOW(), articles_since_lastrefresh = %s WHERE id = %s", (new_user_read_embedding, (user_articles_since_lastrefresh + 1) % read_articles_to_refresh, current_user.id))
+            con.commit()
+
+            # if need to trigger refresh, do so
+            if (user_articles_since_lastrefresh + 1) % read_articles_to_refresh == 0:
+                cur.execute("""UPDATE articleuser
+SET article_user_similarity = 1 - (a.embedding <=> u.recent_articles_read)
+FROM articles a, users u
+WHERE articleuser.article_id = a.id
+AND articleuser.user_id = u.id
+AND articleuser.user_id = %s;""", (current_user.id,))
+                
+                cur.execute("""UPDATE articleuser
+SET fetch_rating = CASE 
+    WHEN su.always_show = TRUE THEN 100.0 
+    ELSE (
+        %s * EXP(LEAST((a.date - CURRENT_DATE)::INT, %s) / %s) + 
+        %s * COALESCE(articleuser.user_rating, articleuser.ai_rating) + 
+        %s * articleuser.article_user_similarity
+    ) 
+END
+FROM articles a, sourceuser su
+WHERE articleuser.article_id = a.id
+AND su.user_id = articleuser.user_id
+AND su.source_id = a.source
+AND articleuser.user_id = %s;""", (fetchparams['recency_factor'], 
+                                    fetchparams['day_decay_threshold'],
+                                    fetchparams['day_decay_scale'],
+                                    fetchparams['rating_factor'],
+                                    fetchparams['similarity_factor'],
+                                    current_user.id,
+                                ))
+
+                con.commit() 
+
         except Exception as e:
             print('Could not update user', current_user.id, 'recent_articles_read for article', payload.articlId, 'due to:', e)
             cur.execute("ROLLBACK")

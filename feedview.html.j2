@@ -104,6 +104,23 @@
     .mark-read-button:hover, .dismiss-button:hover {
       background-color: #f0f0f0; /* Light gray background on hover */
     }
+
+    .controls-container {
+      display: flex;
+      justify-content: flex-end;
+      margin-bottom: 20px;
+    }
+
+    .controls {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+    }
+
+    .controls .source-info {
+      margin-top: 5px;
+      font-style: italic;
+    }
   </style>
 </head>
 <body>
@@ -115,19 +132,30 @@
         articleId: {{ item.articleId }},
         title: "{{ item.title|safe}}",
         articleUrl: "{{ item.articleUrl }}",
-        source: "{{ item.source }}",
+        source: "{{ item.source|safe }}",
+        source_id: {{ item.source_id }},
         author_href: "{{ item.author_href }}",
         author_name: "{{ item.author_name|safe}}",
         date: "{{ item.date }}",
         score: {{ item.score }},
         summary: "{{ item.summary|safe }}",
-        rating: null,
-        read: false
+        rating: {{ item.user_rating }},
+        read: {{ item.user_read }}
       }{{ "," if not loop.last }}
       {% endfor %}
     ];
     import { html, render, Component } from 'https://unpkg.com/htm/preact/standalone.module.js';
   
+    // Function to update the URL with the new source parameter
+    const updateUrlWithSource = (sourceId) => {
+      const url = new URL(window.location.href);
+      // Remove existing source parameters
+      url.searchParams.delete('source');
+      // Add the new source parameter
+      url.searchParams.append('source', sourceId);
+      return url.toString();
+    };
+    
     // Define FeedItem component
     const FeedItem = ({ item, onRate, onMarkAsRead, onDismiss }) => {
       const handleRate = (rating) => {
@@ -159,13 +187,15 @@
               <button class="dismiss-button" onclick=${handleDismiss}>Dismiss for Now</button>
             </div>
             <div>
-              <p><em>${item.source}</em></p>
+              <p><a href=${updateUrlWithSource(item.source_id)}>${item.source}</a></p>
               <p><a href="${item.author_href}" target="_blank">${item.author_name}</a></p>
               <p><strong>Published:</strong> ${new Date(item.date).toLocaleDateString()}</p>
-              <p><strong>Score:</strong> ${item.score.toFixed(3)}</p>
+              ${(item.rating !== false) ? '' : html`<p><strong>Score:</strong> ${item.score.toFixed(3)}</p>`}
             </div>
             <div class="summary">
-              ${item.summary ? html`<div dangerouslySetInnerHTML=${{'{{'}} __html: item.summary {{'}}'}}></div>` : html`<p>No summary provided</p>`}
+              {% raw %}
+              ${item.summary ? html`<div dangerouslySetInnerHTML=${{'__html': item.summary}}></div>` : html`<p>No summary provided</p>`}
+              {% endraw %}
             </div>
           </div>
           <div>
@@ -183,7 +213,9 @@
         super();
         this.state = {
           items: initialFeedData,
-          loading: false
+          loading: false,
+          source: {{ source }},
+          source_names: {{ source_names|safe }},
         };
 
         this.offset = {{ n }};
@@ -195,13 +227,17 @@
         console.log('Iggregate start!')
       }
   
-      fetchFeedItems = async (n, offset, bad, random) => {
+      fetchFeedItems = async (n, offset, sort, unread, source) => {
         try {
             // Show loading state 
             this.setState({ loading: true });
+            let sourceParams = '';
+            if (source && source.length > 0) {
+              sourceParams = source.map(s => `&source=${s}`).join('');
+            }
 
             // Fetch feed items
-            const response = await fetch(`/articles?n=${n}&offset=${offset}&bad=${bad}&random=${random}`, {
+            const response = await fetch(`/articles?n=${n}&offset=${offset}${sourceParams}`, {
                 method: 'GET',
                 headers: {
                     'Content-Type': 'application/json',
@@ -217,6 +253,13 @@
             }
 
             const data = await response.json();
+
+            // Convert string "false"/"true" to actual booleans and recast keys
+            const items = (data.items || []).map(item => ({
+                ...item,
+                rating: item.user_rating === "false" ? false : parseFloat(item.user_rating), // or convert it to a boolean if applicable
+                read: item.user_read === "true"
+            }));
 
             this.setState(prevState => ({
                 items: [...prevState.items, ...(data.items || [])], // Append new items to existing items
@@ -341,6 +384,18 @@
 
         return html`
           <div class="feed-container">
+            <div class="controls-container">
+              <div class="controls">
+                ${source_names && source_names.length > 0 && html`
+                  <div class="source-info">
+                    Showing articles from: ${source_names.join(', ')}
+                  </div>
+                  <div>
+                    <a href="/">Return to Main Feed</a>
+                  </div>
+                `}
+              </div>
+            </div>  
             ${items.map(item => html`
               <${FeedItem}
                 item=${item}
@@ -351,7 +406,7 @@
             `)}
             ${loading ? html`<p>Loading...</p>` : ''}
             <div class="load-more">
-              <button onclick=${() => this.fetchFeedItems(5, this.offset, this.bad, this.random)}>Load More</button>
+              <button onclick=${() => this.fetchFeedItems(5, this.offset, this.state.source)}>Load More</button>
             </div>
           </div>
         `;

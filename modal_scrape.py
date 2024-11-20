@@ -14,7 +14,6 @@ image = (
 
 app = modal.App('newsreader-scrape', image=image)
 vol = modal.Volume.from_name("newsreader-data")
-scrape_queue = modal.Queue.from_name("newsreader-scrape-queue", create_if_missing=True)
 
 # Anthropic system prompt
 system_prompt = """You will be provided with text content scraped from a website in between <CONTENT> and </CONTENT>. The scraper replaces new paragraphs and <divs> with "<|>". Because the scraper only looks for text, interactive elements and images will be omitted. Because no scraper is 100% reliable, some text and sidebars / figures may also be omitted. The content that will be provided has already passed a basic relevancy / rating filter, so you can assume the content is of relatively higher quality.
@@ -76,13 +75,25 @@ def scrapeProcess():
             crawl_record = [row['url'] for row in cur]
 
     # scrape all the sources in parallel for URLs
-    url_lls = list(scrapeSource.map(siteIndices))
+    scrape_data = list(scrapeSource.map(siteIndices))
+    scrape_data = [list_item for ll in scrape_data for list_item in ll ]
 
     # flatten list and filter only for things that haven't been crawled before
     # update crawl record
-    urls = [url for l in url_lls for url in l if url not in crawl_record]
-    print('identified', len(urls), 'new urls for scraper')
-    crawl_record = crawl_record + urls 
+    scrape_data = [sd for sd in scrape_data if sd[1] not in crawl_record]
+    print('identified', len(scrape_data), 'new urls for scraper')
+
+    with modal.Queue.ephemeral() as scrape_queue:
+        # scrape every URL in list and push to queue
+        scrape_output = list(scrapeUrl.starmap([(scrape_queue,) + sd for sd in scrape_data]))
+        crawl_record += [scrape_data[i][1] for i in range(len(scrape_output)) if scrape_output[i] and scrape_output[i] != -1]
+
+        # log articles in queue bite_size at a time, in parallel as needed
+        bite_size = 200
+        while scrape_queue.len() > 0:
+            article_contexts = scrape_queue.get_many(bite_size, block=False)
+            print('running logArticles on', len(article_contexts), 'and seeing', scrape_queue.len(), 'left in queue')
+            logArticles.spawn(article_contexts, users)
 
     # update crawl record up to maximum buffer
     max_records = 10000
@@ -93,16 +104,6 @@ def scrapeProcess():
             pickle.dump(crawl_record, f)
         vol.commit()
 
-    # scrape every URL in list and push to queue
-    _ = list(scrapeUrl.starmap(zip(urls, [scrape_queue for url in urls])))
-
-    # log articles in queue bite_size at a time, in parallel as needed
-    bite_size = 200
-    while scrape_queue.len() > 0:
-        article_contexts = scrape_queue.get_many(bite_size, block=False)
-        print('running logArticles on', len(article_contexts), 'and seeing', scrape_queue.len(), 'left in queue')
-        logArticles.spawn(article_contexts, users)
-
 # gets list of articles from a source
 # only showing examples for Google Blog (using Google News as source) and Huggingface Blog
 # would need to customize for sites of interest
@@ -111,32 +112,68 @@ def scrapeSource(sourceDict):
     import httpx
     import warnings 
     from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+    import html 
+    import datetime
 
     warnings.filterwarnings('ignore', category=XMLParsedAsHTMLWarning) # ignore lxml warning
     max_urls = 100
     sourceType = sourceDict['type']
     sourceUrl = sourceDict['url']
+    sourceId = sourceDict['source_id']
+    sourceSite = sourceDict['site']
+    scrape_data = []
 
     if sourceType == 'google_news':
-        r = httpx.get(sourceUrl)
-        soup = BeautifulSoup(r.content, 'lxml')
-        list_of_urls = [loc.text for loc in soup.find_all('loc')[:max_urls]]
+        try:
+            r = httpx.get(sourceUrl, headers=headers, timeout=10.0)
+        except Exception as e:
+            print('Issue with scraping', sourceUrl, 'exception:', e)
+        else:
+            soup = BeautifulSoup(r.content, 'xml')
+            for loc in soup.find_all('url')[:max_urls]:
+                title = None
+                article_text = None 
+                author_name = None
+                author_href = None
+                date_obj = None
+
+                url = loc.find('loc').get_text().strip()
+                title = html.unescape(loc.find('news:title').get_text().strip())
+                try:
+                    datestr = loc.find('news:publication_date').get_text()
+                    dt_obj = datetime.datetime.strptime(datestr[:10], '%Y-%m-%d')
+                    date_obj = datetime.date(dt_obj.year, dt_obj.month, dt_obj.day)
+                except: 
+                    date_obj = None
+                scrape_data.append((sourceId, url, article_text, title, author_name, author_href, date_obj))
     
     elif sourceType == 'huggingface_rss':
-        r = httpx.get(sourceUrl)
-        soup = BeautifulSoup(r.content, 'xml')
-        list_of_urls = [item.find('guid').text for item in soup.find_all('item')[:max_urls]]
+        try:
+            r = httpx.get(sourceUrl, headers=headers, timeout=10.0)
+        except Exception as e:
+            print('Issue with scraping', sourceUrl, 'exception:', e)
+        else:
+            soup = BeautifulSoup(r.content, 'xml')
+            for loc in soup.find_all('item')[:max_urls]:
+                title = loc.find('title').get_text()
+                article_text = None 
+                author_name = None 
+                author_href = None 
+                datestr = loc.find('pubDate').get_text()
+                date_obj = datetime.datetime.strptime(datestr, '%a, %d %b %Y %H:%M:%S %Z')
+                scrape_data.append((sourceId, url, article_text, title, author_name, author_href, date_obj))
 
-    return list_of_urls
+    return scrape_data
 
 # scrapes a URL based on site type, pushes context to queue for logArticles to parse
 # only showing examples for Google Blog and Huggingface Blog, would need to customize for sites of interest
 @app.function()
-def scrapeUrl(url, queue):
+def scrapeUrl(queue, sourceId, url, article_text, title, author_name, author_href, date_obj):
     import httpx 
     from bs4 import BeautifulSoup
     import datetime 
     import json
+    import html
 
     # utility function to deal with tricky unicode characters
     def remove_unicode(s):
@@ -169,26 +206,7 @@ def scrapeUrl(url, queue):
             author_name = byline_tag.get_text()
             author_href = None # Google Blog doesn't link to authors
 
-            title_tag = soup.find(lambda tag: tag.name=='meta' and 'property' in tag.attrs and 'content' in tag.attrs and tag['property']=='og:title')
-            if title_tag:
-                title = title_tag['content']
-            else:
-                title = None
-            
-            metatag = soup.find(lambda tag: tag.name == 'meta' and 'property' in tag.attrs and tag['property'] == 'article:modified_time')
-            if metatag:
-                datestr = metatag['content'][:10]
-                dt_obj = datetime.datetime.strptime(datestr, '%Y-%m-%d')
-                date_obj = datetime.date(dt_obj.year, dt_obj.month, dt_obj.day)
-            elif soup.find(lambda tag: tag.name == 'meta' and 'property' in tag.attrs and tag['property'] == 'article:published_time'):
-                metatag = soup.find(lambda tag: tag.name == 'meta' and 'property' in tag.attrs and tag['property'] == 'article:published_time')
-                datestr = metatag['content'][:10]
-                dt_obj = datetime.datetime.strptime(datestr, '%Y-%m-%d')
-                date_obj = datetime.date(dt_obj.year, dt_obj.month, dt_obj.day)
-            else:
-                date_obj = None
-
-            queue.put((article_text, title, author_name, author_href, date_obj, 'Google Blog', None, url))
+            queue.put((sourceId, url, article_text, title, author_name, author_href, date_obj))
             return True
 
         elif 'https://huggingface.co/blog/' in url:
@@ -212,19 +230,6 @@ def scrapeUrl(url, queue):
             # for simplicity leaving this out
             author_href = None
             author_name = None
-
-            title_tag = soup.find(lambda tag: tag.name=='meta' and 'property' in tag.attrs and 'content' in tag.attrs and tag['property']=='og:title')
-            if title_tag:
-                title = title_tag['content']
-            else:
-                title = None
-            
-            date_tag = soup.find(lambda tag: tag.name=='span' and tag.get_text()[0:9]=='Published')
-            if date_tag:
-                dt_obj = datetime.datetime.strptime(date_tag.get_text().strip()[9:], '%B %d, %Y')
-                date_obj = datetime.date(dt_obj.year, dt_obj.month, dt_obj.day)
-            else:
-                date_obj = None
             
             queue.put((article_text, title, author_name, author_href, date_obj, 'Canary Media', None, url))
             return True
@@ -281,59 +286,213 @@ def logArticles(article_contexts, users):
     from pgvector.psycopg2 import register_vector
     import datetime
     import numpy as np
+    import json 
+
+    # fetch relevant parameters
+    with open('/data/api/fetchparams.json', 'r') as f:
+        fetchparams = json.load(f)
 
     # utility function to transform scraper outputs for database consumption
     def transform(ind_article):
-        article_text, title, author_name, author_href, date_obj, source, url, summary, embedding = ind_article 
-        return article_text, title, author_name if author_name else 'Author', author_href if author_href else '', date_obj, source, url, summary, embedding
+        sourceId, url, article_text, title, author_name, author_href, date_obj, summary, text_embedding, token_length = ind_article
+        return sourceId, url, article_text, title, author_name if author_name else 'Author', author_href if author_href else '', date_obj, summary, text_embedding, token_length
 
     # invoke modal_recommend class
     obj = modal.Cls.lookup("newsreader-recommend", "NewsreaderRecommendation")()
 
-    articles = [article_context[0] for article_context in article_contexts]
+    embedding_contexts = [article_context[0] for article_context in article_contexts]
+    article_texts = [article_context[2] for article_context in embedding_contexts]
+
+    # summarize articles with Anthropic in parallel
+    summaries = summarize.map(article_texts) 
+
+    # run rating algorithm
+    user_ratings, text_embeddings, token_lengths = obj.rateTextUsers.remote(article_texts, users) 
+
+    embedding_contexts = [article_context+(summary, text_embedding, token_length) for article_context, summary, text_embedding, token_length in zip(embedding_contexts, summaries, text_embeddings, token_lengths.tolist())]
+    article_params = [transform(article_context) for article_context in embedding_contexts]
 
     with psycopg2.connect(os.environ['PSYCOPG2_CONNECTION_STRING']) as con:
         register_vector(con) # allow Python connection to support numpy arrays natively
         cur = con.cursor(cursor_factory=psycopg2.extras.DictCursor)
-        if articles:
-            article_contexts = [article_context[0:6]+(article_context[7],) for article_context in article_contexts]
-            summaries = summarize.map(articles) # summarize articles with Anthropic in parallel
 
-            # run rating algorithm
-            user_ratings, text_embeddings = obj.rateTextUsers.remote(articles, users) 
-            article_contexts = [article_context+(summary, text_embedding,) for article_context, summary, text_embedding in zip(article_contexts, summaries, text_embeddings)]
-            article_params = list(map(transform, article_contexts))
+        # insert articles into database
+        try:
+            article_ids = psycopg2.extras.execute_values(cur, """INSERT INTO articles (source, url, text, title, author_name, author_href, date, summary, embedding, token_length) VALUES %s RETURNING id""", article_params, fetch=True)
+            con.commit()
+            print("successfully added", len(article_ids), "articles rows")
+        except Exception as e:
+            print('Ran into psycopg2 error while inserting', len(article_contexts), 'articles:', e)
+            cur.execute("ROLLBACK")
+            return False
 
-            # insert articles into database
+        # insert AI ratings into database    
+        count = 0
+        article_ids = [article_id[0] for article_id in article_ids]
+        for user_rating, user_id in zip(user_ratings, users):
+            article_user_params = [(user_id, False, float(user_article_rating), datetime.datetime.utcnow(), article_id) for user_article_rating, article_id in zip(user_rating, article_ids)]
             try:
-                article_ids = psycopg2.extras.execute_values(cur, """INSERT INTO articles (text, title, author_name, author_href, date, source, url, summary, embedding) VALUES %s RETURNING id""", article_params, fetch=True)
+                article_user_ids = psycopg2.extras.execute_values(cur, """INSERT INTO articleuser (user_id, user_read, ai_rating, rating_timestamp, article_id) VALUES %s RETURNING id""", article_user_params, fetch=True)
                 con.commit()
-                print("successfully added", len(article_ids), "articles rows")
-            except Exception as e:
-                print('Ran into psycopg2 error while inserting', len(article_contexts), 'articles:', e)
+                count += len(article_user_ids)
+            except:
                 cur.execute("ROLLBACK")
+                print('Could not insert', len(article_user_params), 'ai_ratings of articles due to psycopg2 error:', e)
                 return False
+        
+        # insert fake AI ratings into database
+        fake_article_user_params = []
+        for article_id in article_ids[user_ratings[0].shape[0]:]:
+            for user_id in users:
+                fake_article_user_params.append((user_id, False, 0.5, datetime.datetime.utcnow(), article_id))
+        
+        try:
+            article_user_ids = psycopg2.extras.execute_values(cur, """INSERT INTO articleuser (user_id, user_read, ai_rating, rating_timestamp, article_id) VALUES %s RETURNING id""", fake_article_user_params, fetch=True)
+            con.commit()
+            count += len(article_user_ids)
+        except:
+            cur.execute("ROLLBACK")
+            print('Could not insert', len(fake_article_user_params), 'fake ai_ratings of articles due to psycopg2 error:', e)
+            return False
 
-            # insert AI ratings into database    
-            count = 0
-            article_ids = [article_id[0] for article_id in article_ids]
-            for user_rating, user_id in zip(user_ratings, users):
-                article_user_params = [(user_id, False, float(user_article_rating[0]), datetime.datetime.utcnow(), article_id) for user_article_rating, article_id in zip(user_rating, article_ids)]
-                try:
-                    article_user_ids = psycopg2.extras.execute_values(cur, """INSERT INTO articleuser (user_id, user_read, ai_rating, rating_timestamp, article_id) VALUES %s RETURNING id""", article_user_params, fetch=True)
-                    con.commit()
-                    count += len(article_user_ids)
-                except:
-                    cur.execute("ROLLBACK")
-                    for user_id, user_article_rating, article_id in article_user_params:
-                        try:
-                            cur.execute("""INSERT INTO articleuser (user_id, user_read, ai_rating, rating_timestamp, article_id) VALUES (%s, FALSE, %s, NOW(), %s)""", (user_id, user_article_rating, article_id))
-                            con.commit()
-                            count += 1
-                        except Exception as e:
-                            cur.execute("ROLLBACK")
-                            print('Could not insert rating of article', article_id, 'for user', user_id, 'due to psycopg2 error:', e)
-            
-            print('successfully added', count, 'articleuser rows')
+        print('successfully added', count, 'articleuser rows')
+
+        # update articleuser similarity and fetch_rating
+        print("updating fetch_ratings and clearing out articleusers with missing similarity scores")
+        try:
+            cur.execute("""UPDATE articleuser
+SET article_user_similarity = 1 - (a.embedding <=> u.recent_articles_read)
+FROM articles a, users u
+WHERE articleuser.article_id = a.id
+AND articleuser.user_id = u.id
+AND articleuser.article_user_similarity IS NULL;""")
+                
+            cur.execute("""UPDATE articleuser
+SET fetch_rating = CASE 
+    WHEN su.always_show = TRUE THEN 100.0 
+    ELSE (
+        %s * EXP(LEAST((a.date - CURRENT_DATE)::INT, %s) / %s) + 
+        %s * COALESCE(articleuser.user_rating, articleuser.ai_rating) + 
+        %s * articleuser.article_user_similarity
+    ) 
+END
+FROM articles a, sourceuser su
+WHERE articleuser.article_id = a.id
+AND su.user_id = articleuser.user_id
+AND su.source_id = a.source
+AND articleuser.fetch_rating IS NULL;""", (fetchparams['recency_factor'], 
+                                    fetchparams['day_decay_threshold'],
+                                    fetchparams['day_decay_scale'],
+                                    fetchparams['rating_factor'],
+                                    fetchparams['similarity_factor'],
+                                ))
+            con.commit()
+        except:
+            cur.execute("ROLLBACK")
+            print('Could not update fetch_ratings due to psycopg2 error:', e)
+            return False
 
     return True 
+
+@app.function(timeout=3600, volumes={"/data": vol}, schedule=modal.Cron("0 4 * * *"), secrets=[modal.Secret.from_name("iggregate_psycopg2")])
+def cleanUp():
+    import psycopg2
+    import psycopg2.extras
+    from pgvector.psycopg2 import register_vector
+    import time
+    import json
+
+    print('running cleanUp')
+
+    # get relevant parameters
+    with open('/data/model/train_params.json', 'r') as f:
+        trainparams = json.load(f)
+
+    with open('/data/api/fetchparams.json', 'r') as f:
+        fetchparams = json.load(f)
+    
+    clean_up_summaries_bite_size = trainparams['clean_up_summaries_bite_size']
+    clean_up_summaries_max_run = trainparams['clean_up_summaries_max_run']
+
+    # clean up ratings
+    print('add ratings to articleusers without')
+    add_ratings_to_null_query = """INSERT INTO articleuser (article_id, user_id, ai_rating, created_at, updated_at, rating_timestamp)
+SELECT 
+    a.id AS article_id, 
+    u.id AS user_id, 
+    0.5*(1-(a.embedding<=>u.embedding))+0.5 AS ai_rating,
+    NOW() AS created_at,
+    NOW() AS updated_at,
+    NOW() AS rating_timestamp
+FROM articles a
+JOIN users u ON (1=1)
+LEFT JOIN articleuser au ON a.id = au.article_id AND u.id = au.user_id
+WHERE au.article_id IS NULL
+"""
+    with psycopg2.connect(os.environ['PSYCOPG2_CONNECTION_STRING']) as con:
+        cur = con.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        ids = cur.execute(add_ratings_to_null_query)
+        if ids and len(ids) > 0:
+            print(len(ids), 'missing articleusers added')
+        else:
+            print('no articles missing articleusers')
+        con.commit()
+
+    print('add ratings to articleusers with NULL ai_ratings')
+    add_ratings_to_nullrating_query = """UPDATE articleuser
+SET 
+    ai_rating = 0.5 + 0.5 * (1 - (a.embedding <=> u.embedding)),
+    rating_timestamp = NOW(),
+    updated_at = NOW()
+FROM 
+    articles a, 
+    users u
+WHERE 
+    articleuser.article_id = a.id
+    AND articleuser.user_id = u.id
+    AND (articleuser.ai_rating IS NULL OR articleuser.ai_rating > 1.5)
+"""
+    with psycopg2.connect(os.environ['PSYCOPG2_CONNECTION_STRING']) as con:
+        cur = con.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        cur.execute(add_ratings_to_nullrating_query)
+        con.commit()
+
+    # update all fetch_ratings due to dates and any where article similarity is NULL
+    print("updating fetch_ratings and clearing out articleusers with missing similarity scores")
+    with psycopg2.connect(os.environ['PSYCOPG2_CONNECTION_STRING']) as con:
+        cur = con.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        try:
+            cur.execute("""UPDATE articleuser
+SET article_user_similarity = 1 - (a.embedding <=> u.recent_articles_read)
+FROM articles a, users u
+WHERE articleuser.article_id = a.id
+AND articleuser.user_id = u.id
+AND articleuser.article_user_similarity IS NULL;""")
+                
+            cur.execute("""UPDATE articleuser
+SET fetch_rating = CASE 
+    WHEN su.always_show = TRUE THEN 100.0 
+    ELSE (
+        %s * EXP(LEAST((a.date - CURRENT_DATE)::INT, %s) / %s) + 
+        %s * COALESCE(articleuser.user_rating, articleuser.ai_rating) + 
+        %s * articleuser.article_user_similarity
+    ) 
+END
+FROM articles a, sourceuser su
+WHERE articleuser.article_id = a.id
+AND su.user_id = articleuser.user_id
+AND su.source_id = a.source;""", (fetchparams['recency_factor'], 
+                                    fetchparams['day_decay_threshold'],
+                                    fetchparams['day_decay_scale'],
+                                    fetchparams['rating_factor'],
+                                    fetchparams['similarity_factor'],
+                                ))
+            con.commit()
+        except Exception as e:
+            cur.execute("ROLLBACK")
+            print('Could not update fetch_ratings due to psycopg2 error:', e)
+
+    print("reindexing articleuser")
+    with psycopg2.connect(os.environ['PSYCOPG2_CONNECTION_STRING']) as con:
+        cur = con.cursor()
+        cur.execute("REINDEX TABLE articleuser")
