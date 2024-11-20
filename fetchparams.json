@@ -1,1 +1,9 @@
-{"recency_factor": 0.25, "day_decay_threshold": -60, "day_decay_scale": 30.0, "rating_factor": 0.5, "similarity_factor": 0.25, "article_history_inertia": 0.85}
+{
+    "recency_factor": 0.2, 
+    "day_decay_threshold": -75, 
+    "day_decay_scale": 30.0, 
+    "rating_factor": 0.6, 
+    "similarity_factor": 0.2, 
+    "article_history_inertia": 0.85,
+    "read_articles_to_refresh": 10
+}

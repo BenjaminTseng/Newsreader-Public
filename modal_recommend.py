@@ -1,22 +1,18 @@
 import modal
 
-# preprocessor preload baked into image construction
-def download_preprocessor():
-    import keras_nlp 
-    base_model_id = "roberta_base_en"
-    preprocessor = keras_nlp.models.RobertaPreprocessor.from_preset(base_model_id)
-
-tf_image = (
-    modal.Image.from_registry('tensorflow/tensorflow:2.16.1')
-    .pip_install('keras==3.3.2')
-    .pip_install('keras-nlp==0.9.3')
-    .run_function(download_preprocessor)
+jax_image = (
+    modal.Image.debian_slim(python_version='3.11')
+    .pip_install('jax[cuda12]==0.4.35', extra_options="-U")
+    .pip_install('keras==3.6')
+    .pip_install('keras-hub==0.17')
+    .env({"KERAS_BACKEND":"jax"}) # sets environmental variable so switches to JAX
+    .env({"XLA_PYTHON_CLIENT_MEM_FRACTION":"1.0"})
 )
-app = modal.App("newsreader-recommend", image=tf_image)
+app = modal.App("newsreader-recommend", image=jax_image)
 vol = modal.Volume.from_name("newsreader-data")
 
 # use Modal class to reduce cold start times by enabling memory snapshot and using @modal.enter to preload weights
-@app.cls(volumes={"/data": vol}, enable_memory_snapshot=True, cpu=8.0, timeout=1000, retries=2)
+@app.cls(volumes={"/data": vol}, enable_memory_snapshot=True, timeout=1800, container_idle_timeout=120, retries=2)
 class NewsreaderRecommendation:
     @modal.enter(snap=True)
     def enter(self):
@@ -29,10 +25,14 @@ class NewsreaderRecommendation:
         warnings.filterwarnings('ignore')
         
         import keras 
-        import keras_nlp
+        import keras_hub
+        import json
 
-        self.base_model_id = "roberta_base_en"
-        self.preprocessor = keras_nlp.models.RobertaPreprocessor.from_preset(self.base_model_id)
+        with open('/data/model/train_params.json', 'r') as f:
+            trainparams = json.load(f)
+            model_id = trainparams['model_id']
+
+        self.preprocessor = keras_hub.models.TextClassifierPreprocessor.from_preset(model_id)
 
         with open('/data/model/best_model.txt', 'r') as f:
             model_path = '/data/model/'+f.read().strip()
@@ -40,44 +40,41 @@ class NewsreaderRecommendation:
         self.model.quantize('int8') # quantize model to reduce memory impact / boost performance
         
         # save model surgery results for actual usage at run-time
-        self.rating_model = keras.Model(inputs=self.model.inputs[2:], outputs=[self.model.outputs[1], self.model.get_layer('neural_collaborative_filter').input[0]], name='token_recommendation_model')
-        self.vector_model = keras.Model(inputs=self.model.get_layer('neural_collaborative_filter').input, outputs=self.model.outputs[1], name='vector_recommendation_model')
-        self.user_embeddings = self.model.get_layer('user_preferences').get_weights()[0]
+        self.user_embedding = keras.Model(inputs=self.model.inputs[2], outputs=self.model.get_layer('rating_out').input[1])
         self.text_embedding = self.model.get_layer('backbone_model')
 
     # generates article embeddings from list of articles    
     @modal.method()
     def embedText(self, text_array):
-        import keras
-        text_tensors = keras.ops.convert_to_tensor(text_array)
-        preprocessed = self.preprocessor(text_tensors)
-        return self.text_embedding.predict([preprocessed['token_ids'], preprocessed['padding_mask']])
+        import numpy as np 
+        
+        token_lengths = np.array([len(tokens) for tokens in self.preprocessor.tokenizer(text_array)])
+        preprocessed = self.preprocessor(text_array)
+        return self.text_embedding.predict([preprocessed['token_ids'], preprocessed['padding_mask']]), token_lengths
 
     # returns user embeddings
     @modal.method()
-    def extractUserEmbeddings(self):
-        return self.user_embeddings
+    def embedUser(self, user_ids):
+        import keras
+        return self.user_embedding.predict(keras.ops.convert_to_tensor(user_ids))
     
     # rates list of text for list of users
     # returns article embeddings and list of ratings for each article (for each user)
     @modal.method()
-    def rateTextUsers(self, text_array, user_id_list):
+    def rateTextUsers(self, text_array, user_ids):
+        import numpy as np
         import keras
-        text_tensors = keras.ops.convert_to_tensor(text_array)
-        preprocessed = self.preprocessor(text_tensors)
-        ratings = []
-        for user_id in user_id_list:
-            user_rating_set, text_embeddings = self.rating_model.predict([preprocessed['token_ids'], preprocessed['padding_mask'], keras.ops.ones(text_tensors.shape[0])*user_id])
-            ratings.append(user_rating_set)
-        return ratings, text_embeddings 
 
-    # performs rateTextUsers task but on article embeddings and user embeddings directly
-    @modal.method()
-    def rateVectors(self, text_vector_array, user_vector_list):
-        import keras
-        ratings = []
-        text_tensors = keras.ops.convert_to_tensor(text_vector_array)
-        for user_vector in user_vector_list:
-            user_tensor = keras.ops.stack([user_vector for i in range(text_tensors.shape[0])])
-            ratings.append(self.vector_model.predict([text_tensors, user_tensor]))
-        return ratings 
+        # sub in embedText code
+        token_lengths = np.array([len(tokens) for tokens in self.preprocessor.tokenizer(text_array)])
+        preprocessed = self.preprocessor(text_array)
+        text_vec = self.text_embedding.predict([preprocessed['token_ids'], preprocessed['padding_mask']])
+
+        # sub in embedUser
+        user_vec = self.user_embedding.predict(keras.ops.convert_to_tensor(user_ids))
+        
+        ratings = 0.5 + 0.5*np.matmul(
+            text_vec/np.linalg.norm(text_vec, axis=-1, keepdims=True),
+            user_vec.T/np.linalg.norm(user_vec, axis=-1,keepdims=True).T
+        ).T
+        return ratings, text_vec, token_lengths 

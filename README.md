@@ -11,7 +11,7 @@ Refer to ["Building a Personalized News Reader with AI"](https://benjamintseng.c
 
 ## Dependencies
 The repository includes the core files necessary but requires a few additional elements to setup:
-1. A Postgres database with [`pgvector`](https://github.com/pgvector/pgvector) extension setup — refer to ["Building a Personalized News Reader with AI"](https://benjamintseng.com/portfolio/building-a-personalized-news-reader-with-ai/) for the tables needed. I've utilized [Supabase](https://supabase.com/) but, in principle, any Postgres service that supports `pgvector` will work
+1. A Postgres database with [`pgvector`](https://github.com/pgvector/pgvector) extension setup — refer to ["Building a Personalized News Reader with AI"](https://benjamintseng.com/portfolio/building-a-personalized-news-reader-with-ai/) for the tables and indices needed. I've utilized [Supabase](https://supabase.com/) but, in principle, any Postgres service that supports `pgvector` will work
 2. [Modal.com](https://modal.com/) — This uses Modal's serverless platform to train and serve the model, carry out the scrape processes necessary, and serve the web application. The individual Python files become  Modal functions which are invoked on a regular basis via [Modal's cron functionality](https://modal.com/docs/guide/cron) or by other Modal functions. The easy integration with the command line and Python make this a very fast way of deploying novel services. In particular, it makes use of:
     * [Modal secrets](https://modal.com/docs/guide/secrets) which pass secret parameters (like API keys, connection strings, etc) as environment variables
     * [Modal volumes](https://modal.com/docs/guide/volumes) which allow persistent storage of templates, parameters, and model weights. For this project, I have a simple directory structure with web application-specific templates and parameters in `/api/` directory, model-specific weights and parameters in `/model/` directory, and the crawl record and scraping parameters in `/scrape/` directory
@@ -23,9 +23,8 @@ The repository includes the core files necessary but requires a few additional e
 `modal_train.py` and `modal_recommend.py` assume the availabilty of a pre-trained model that conforms to the following Keras code. The `tf.data` data pipeline and the model compilation / fitting / evaluation used in  the `modal_train.py` are identical to what was used to initially train this model on Google CoLab.
 
 ```
-# needs tf 2.16.1 and Keras 3
-import tensorflow as tf
-import keras_nlp
+# needs jax 0.4 and Keras 3
+import keras_hub
 import keras
 import numpy as np
 
@@ -42,11 +41,11 @@ train_val_split = 0.1
 
 # pull Roberta preprocessor
 model_id = "roberta_base_en"
-preprocessor = keras_nlp.models.RobertaPreprocessor.from_preset(model_id)
+preprocessor = keras_hub.models.TextClassifierPreprocessor.from_preset(model_id)
 tokenizer = preprocessor.tokenizer
 
 # pull Roberta backbone
-backbone = keras_nlp.models.RobertaBackbone.from_preset(model_id)
+backbone = keras_hub.models.Backbone.from_preset(model_id)
 
 # assumes you've set up a tf.data pipeline similar to what's in modal_train.py
 # define backbone model
@@ -59,33 +58,21 @@ emb = keras.layers.Dense(text_embedding_dim, activation='tanh')(x)
 backbone_model = keras.Model(inputs=[input_tokens, input_padding], outputs=emb, name='backbone_model')
 
 # define length model
-input_tokens1 = keras.Input(shape=(max_chunk_size,), dtype='int32', name='length_tokens')
-input_padding1 = keras.Input(shape=(max_chunk_size,), dtype="bool", name='length_padding')
-lenemb = backbone_model([input_tokens1, input_padding1])
-lenx = keras.layers.Dropout(0.5)(lenemb)
+lenx = keras.layers.Dropout(0.5)(emb)
 lenx = keras.layers.Dense(intermediate_dim, activation='relu', kernel_regularizer='l2')(lenx)
 lenout = keras.layers.Dense(1, name='length_out')(lenx)
 
 # define recommendation model
-input_tokens2 = keras.Input(shape=(max_chunk_size,), dtype='int32', name='recommendation_tokens')
-input_padding2 = keras.Input(shape=(max_chunk_size,), dtype="bool", name='recommendation_padding')
 input_user = keras.Input(shape=(1,), dtype='int32', name='user_id')
-recx = backbone_model([input_tokens2, input_padding2])
 user_emb = keras.layers.Flatten()(
     keras.layers.Embedding(num_users, user_embedding_dim, name='user_preferences')(input_user)
 )
-bigemb = keras.layers.Concatenate(name='neural_collaborative_filter')([recx, user_emb])
-recx = keras.layers.Dropout(0.5)(bigemb)
-recx = keras.layers.Dense(user_intermediate_dim, activation='relu', kernel_regularizer='l2')(recx)
-recx = keras.layers.Dropout(0.5)(recx)
-recx = keras.layers.Dense(intermediate_dim, activation='relu', kernel_regularizer='l2')(recx)
-recx = keras.layers.Dropout(0.5)(recx)
-recx = keras.layers.Dense(intermediate_dim, activation='relu')(recx)
-recout = keras.layers.Dense(1, activation='sigmoid', name='recommend_out')(recx)
+recx = keras.layers.Dot(axes=-1)([emb, user_emb])
+recout = keras.ops.sigmoid(recx)
 
 # define model for training
 train_model = keras.Model(
-    inputs=[input_tokens1, input_padding1, input_tokens2, input_padding2, input_user], 
+    inputs=[input_tokens, input_padding, input_user], 
     outputs=[lenout, recout], 
     name='train_model'
 )

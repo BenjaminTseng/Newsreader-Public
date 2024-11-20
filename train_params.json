@@ -1,1 +1,13 @@
-{"num_articles_posttrain": 1000, "num_articles_embedding_avg_posttrain": 10, "model_id": "roberta_base_en", "max_user_ratings": 5000, "type_all_epochs": 5, "recommend_mse_patience": 6, "batch_size": 10, "train_val_split": 0.1}
+{
+    "num_articles_posttrain": 1000,
+    "user_history_ema": 20,
+    "model_id": "roberta_base_en",
+    "max_user_ratings": 5000,
+    "type_all_epochs": 40,
+    "rating_out_mse_patience": 5,
+    "batch_size": 15,
+    "train_val_split": 0.1,
+    "clean_up_summaries_bite_size": 40,
+    "clean_up_summaries_max_run": 800,
+    "clean_up_max_articles": 28000
+}
