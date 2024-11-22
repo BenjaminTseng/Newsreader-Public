@@ -3,14 +3,14 @@ import os
 
 # Modal
 image = (
-    modal.Image.debian_slim(python_version='3.10')
-    .pip_install('httpx')
+    modal.Image.debian_slim(python_version='3.11')
+    .pip_install('httpx==0.27.2')
     .pip_install('beautifulsoup4')
-    .pip_install('lxml')
-    .pip_install('psycopg2-binary')
-    .pip_install('pgvector')
+    .pip_install('lxml==5.3')
+    .pip_install('psycopg2-binary==2.9.10')
+    .pip_install('pgvector==0.3.6')
 #    .pip_install('anthropic')
-    .pip_install('google-generativeai')
+    .pip_install('google-generativeai==0.8.3')
 )
 
 app = modal.App('newsreader-scrape', image=image)

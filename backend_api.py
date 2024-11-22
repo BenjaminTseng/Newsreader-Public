@@ -15,14 +15,16 @@ root_path = '/data/api/'
 
 # Modal image initialization
 image = (
-    modal.Image.debian_slim(python_version='3.10')
-    .pip_install('psycopg2-binary')
-    .pip_install('pgvector')
-    .pip_install('jinja2')
+    modal.Image.debian_slim(python_version='3.11')
+    .pip_install('fastapi[standard]==0.115.5')
+    .pip_install('pydantic==2.10')
+    .pip_install('psycopg2-binary==2.9.10')
+    .pip_install('pgvector==0.3.6')
+    .pip_install('jinja2==3.1.4')
     .pip_install('passlib[bcrypt]')
     .pip_install('python-jose[cryptography]')
     .pip_install('python-multipart')
-    .pip_install('supabase')
+    .pip_install('supabase==2.10')
 )
 
 app = modal.App('newsreader', image=image)
