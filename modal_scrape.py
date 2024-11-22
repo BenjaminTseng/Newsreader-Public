@@ -9,7 +9,8 @@ image = (
     .pip_install('lxml')
     .pip_install('psycopg2-binary')
     .pip_install('pgvector')
-    .pip_install('anthropic')
+#    .pip_install('anthropic')
+    .pip_install('google-generativeai')
 )
 
 app = modal.App('newsreader-scrape', image=image)
@@ -241,41 +242,31 @@ def scrapeUrl(queue, sourceId, url, article_text, title, author_name, author_hre
         print('Issue with', url, 'Exception flagged:', e)
         return False
 
-# invokes Anthropic to generate summaries
-@app.function(secrets=[modal.Secret.from_name("newsreader_anthropic_key")], retries=modal.Retries(max_retries=2, backoff_coefficient=1.0, initial_delay=60.0))
+# invokes Google Gemini to generate summaries
+@app.function(secrets=[modal.Secret.from_name("newsreader_google_ai_key")], retries=modal.Retries(max_retries=2, backoff_coefficient=1.0, initial_delay=60.0))
 def summarize(article):
-    import anthropic
+    import google.generativeai as genai
+    import os
     from bs4 import BeautifulSoup
 
-    client = anthropic.Anthropic()
+    genai.configure(api_key=os.environ["GEMINI_API_KEY"])
+    gen_config = genai.types.GenerationConfig(max_output_tokens=1000, temperature=0.0)
+    model = genai.GenerativeModel("gemini-1.5-flash-002", system_instruction=system_prompt)
     try:
-        # invoke Anthropic, truncate text if longer than 14,000 characters
-        message = client.messages.create(
-            model="claude-3-haiku-20240307",
-            max_tokens=1000,
-            temperature=0,
-            system=system_prompt,
-            messages=[
-                {
-                    "role":"user",
-                    "content":[
-                        {
-                            "type": "text",
-                            "text": "<CONTENT>\n" + (article if len(article) <= 14000 else "<TRUNCATED FOR LENGTH>" + article[:14000] + "</TRUNCATED FOR LENGTH>") + "\n</CONTENT>"
-                        }
-                    ]
-                }
-            ]
+        # invoke Gemini Flash, truncate text if longer than 100,000 characters
+        message = model.generate_content(
+            "<CONTENT>\n" + (article if len(article) <= 100000 else "<TRUNCATED FOR LENGTH>" + article[:100000] + "</TRUNCATED FOR LENGTH>") + "\n</CONTENT>",
+            generation_config=gen_config
         )
         try:
-            soup = BeautifulSoup(message.content[0].text, 'lxml')
+            soup = BeautifulSoup(message.text, 'lxml')
             response = "<strong>Topics:</strong> " + ', '.join([topic.get_text(strip=True) for topic in soup.topics.find_all('topic')]) + "<br /><strong>Summary:</strong><br />" + soup.summary.get_text(strip=True)
             return response
         except Exception as e:
             print('failed to capture summary from raw XML:', message.content[0].text)
             return None
     except Exception as e:
-        print('Anthropic issue, returning None:', e)
+        print('Google issue, returning None:', e)
         return None
 
 # reads outputs from scraper in parallel and runs rating algorithm on users
