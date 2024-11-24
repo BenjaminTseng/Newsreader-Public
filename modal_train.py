@@ -323,7 +323,7 @@ LIMIT %s"""
         cur = con.cursor(cursor_factory=psycopg2.extras.DictCursor)
         try:
             cur.execute("""UPDATE articleuser
-SET article_user_similarity = 1 - (a.embedding <=> u.recent_articles_read)
+SET article_user_similarity = 0.5*(a.embedding <=> u.recent_articles_read)
 FROM articles a, users u
 WHERE articleuser.article_id = a.id
 AND articleuser.user_id = u.id
