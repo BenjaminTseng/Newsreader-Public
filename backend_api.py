@@ -52,6 +52,8 @@ class FeedItem(BaseModel):
     source: str 
     summary: str 
     score: float
+    user_rating: str
+    user_read: str
 
 class FeedItemListResponse(BaseModel):
     offset: int
