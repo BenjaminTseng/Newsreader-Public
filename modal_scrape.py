@@ -139,6 +139,8 @@ def scrapeSource(sourceDict):
                 date_obj = None
 
                 url = loc.find('loc').get_text().strip()
+                if url.find('/?') > 0:
+                    url = url[:url.find('/?')+1]
                 title = html.unescape(loc.find('news:title').get_text().strip())
                 try:
                     datestr = loc.find('news:publication_date').get_text()
@@ -156,6 +158,9 @@ def scrapeSource(sourceDict):
         else:
             soup = BeautifulSoup(r.content, 'xml')
             for loc in soup.find_all('item')[:max_urls]:
+                url = loc.find('guid').get_text().strip()
+                if url.find('/?') > 0:
+                    url = url[:url.find('/?')+1]
                 title = loc.find('title').get_text()
                 article_text = None 
                 author_name = None 
@@ -309,7 +314,7 @@ def logArticles(article_contexts, users):
 
         # insert articles into database
         try:
-            article_ids = psycopg2.extras.execute_values(cur, """INSERT INTO articles (source, url, text, title, author_name, author_href, date, summary, embedding, token_length) VALUES %s RETURNING id""", article_params, fetch=True)
+            article_ids = psycopg2.extras.execute_values(cur, """INSERT INTO articles (source, url, text, title, author_name, author_href, date, summary, embedding, token_length) VALUES %s ON CONFLICT DO NOTHING RETURNING id""", article_params, fetch=True)
             con.commit()
             print("successfully added", len(article_ids), "articles rows")
         except Exception as e:
@@ -323,7 +328,7 @@ def logArticles(article_contexts, users):
         for user_rating, user_id in zip(user_ratings, users):
             article_user_params = [(user_id, False, float(user_article_rating), datetime.datetime.utcnow(), article_id) for user_article_rating, article_id in zip(user_rating, article_ids)]
             try:
-                article_user_ids = psycopg2.extras.execute_values(cur, """INSERT INTO articleuser (user_id, user_read, ai_rating, rating_timestamp, article_id) VALUES %s RETURNING id""", article_user_params, fetch=True)
+                article_user_ids = psycopg2.extras.execute_values(cur, """INSERT INTO articleuser (user_id, user_read, ai_rating, rating_timestamp, article_id) VALUES %s ON CONFLICT DO NOTHING RETURNING id""", article_user_params, fetch=True)
                 con.commit()
                 count += len(article_user_ids)
             except:
@@ -338,7 +343,7 @@ def logArticles(article_contexts, users):
                 fake_article_user_params.append((user_id, False, 0.5, datetime.datetime.utcnow(), article_id))
         
         try:
-            article_user_ids = psycopg2.extras.execute_values(cur, """INSERT INTO articleuser (user_id, user_read, ai_rating, rating_timestamp, article_id) VALUES %s RETURNING id""", fake_article_user_params, fetch=True)
+            article_user_ids = psycopg2.extras.execute_values(cur, """INSERT INTO articleuser (user_id, user_read, ai_rating, rating_timestamp, article_id) VALUES %s ON CONFLICT DO NOTHING RETURNING id""", fake_article_user_params, fetch=True)
             con.commit()
             count += len(article_user_ids)
         except:
