@@ -367,8 +367,8 @@ AND articleuser.article_user_similarity IS NULL;""")
 SET fetch_rating = CASE 
     WHEN su.always_show = TRUE THEN 100.0 
     ELSE (
-        %s * EXP(LEAST((a.date - CURRENT_DATE)::INT, %s) / %s) + 
-        %s * COALESCE(articleuser.user_rating, articleuser.ai_rating) + 
+        %s * EXP(GREATEST((a.date - CURRENT_DATE)::INT, %s) / %s) + 
+        %s * COALESCE(articleuser.user_rating, articleuser.ai_rating) - 
         %s * articleuser.article_user_similarity
     ) 
 END
@@ -469,8 +469,8 @@ AND articleuser.article_user_similarity IS NULL;""")
 SET fetch_rating = CASE 
     WHEN su.always_show = TRUE THEN 100.0 
     ELSE (
-        %s * EXP(LEAST((a.date - CURRENT_DATE)::INT, %s) / %s) + 
-        %s * COALESCE(articleuser.user_rating, articleuser.ai_rating) + 
+        %s * EXP(GREATEST((a.date - CURRENT_DATE)::INT, %s) / %s) + 
+        %s * COALESCE(articleuser.user_rating, articleuser.ai_rating) - 
         %s * articleuser.article_user_similarity
     ) 
 END
