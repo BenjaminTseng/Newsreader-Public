@@ -33,7 +33,7 @@ import numpy as np
 intermediate_dim = 128
 roberta_dim = 768
 text_embedding_dim = roberta_dim*2
-user_embedding_dim = 500
+user_embedding_dim = roberta_dim*2
 user_intermediate_dim = 512
 batch_size = 10
 num_users = 10
